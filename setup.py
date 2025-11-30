@@ -3,6 +3,7 @@ import re
 import subprocess
 import sys
 from datetime import date
+import shutil
 
 import setuptools
 import torch
@@ -71,121 +72,135 @@ if __name__ == "__main__":
 
     ROOT_DIR = os.path.dirname(__file__)
 
-    INCLUDE_DIRS = [
-        "src",
-        "third_party/cutlass/include",
-        "third_party/json/include",
-        "third_party/mio/include",
-        "third_party/spdlog/include",
-        "third_party/Block-Sparse-Attention/csrc/block_sparse_attn",
-    ]
+    ext_modules = []
+    only_build_wheels = os.getenv("ONLY_BUILD_WHEELS", "0") == "1"
+    kernels_dir = os.path.join(ROOT_DIR, "dist", "kernels")
+    kernels_exist = os.path.isdir(kernels_dir) and len(os.listdir(kernels_dir)) > 0
 
-    INCLUDE_DIRS = [os.path.join(ROOT_DIR, dir) for dir in INCLUDE_DIRS]
+    if only_build_wheels and kernels_exist:
+        print("ONLY_BUILD_WHEELS is set to 1 and kernels found in dist/kernels. Skipping CUDA extension build.")
+        shutil.copytree(kernels_dir, os.path.join(ROOT_DIR, "nunchaku", "kernels"), dirs_exist_ok=True)
+    else:
+        INCLUDE_DIRS = [
+            "src",
+            "third_party/cutlass/include",
+            "third_party/json/include",
+            "third_party/mio/include",
+            "third_party/spdlog/include",
+            "third_party/Block-Sparse-Attention/csrc/block_sparse_attn",
+        ]
 
-    DEBUG = False
+        INCLUDE_DIRS = [os.path.join(ROOT_DIR, dir) for dir in INCLUDE_DIRS]
 
-    def ncond(s) -> list:
-        if DEBUG:
-            return []
-        else:
-            return [s]
+        DEBUG = False
 
-    def cond(s) -> list:
-        if DEBUG:
-            return [s]
-        else:
-            return []
+        def ncond(s) -> list:
+            if DEBUG:
+                return []
+            else:
+                return [s]
 
-    sm_targets = get_sm_targets()
-    print(f"Detected SM targets: {sm_targets}", file=sys.stderr)
+        def cond(s) -> list:
+            if DEBUG:
+                return [s]
+            else:
+                return []
 
-    assert len(sm_targets) > 0, "No SM targets found"
+        sm_targets = get_sm_targets()
+        print(f"Detected SM targets: {sm_targets}", file=sys.stderr)
 
-    GCC_FLAGS = ["-DENABLE_BF16=1", "-DBUILD_NUNCHAKU=1", "-fvisibility=hidden", "-g", "-std=c++20", "-UNDEBUG", "-Og"]
-    MSVC_FLAGS = ["/DENABLE_BF16=1", "/DBUILD_NUNCHAKU=1", "/std:c++20", "/UNDEBUG", "/Zc:__cplusplus", "/FS"]
-    NVCC_FLAGS = [
-        "-DENABLE_BF16=1",
-        "-DBUILD_NUNCHAKU=1",
-        "-g",
-        "-std=c++20",
-        "-UNDEBUG",
-        "-Xcudafe",
-        "--diag_suppress=20208",  # spdlog: 'long double' is treated as 'double' in device code
-        *cond("-G"),
-        "-U__CUDA_NO_HALF_OPERATORS__",
-        "-U__CUDA_NO_HALF_CONVERSIONS__",
-        "-U__CUDA_NO_HALF2_OPERATORS__",
-        "-U__CUDA_NO_HALF2_CONVERSIONS__",
-        "-U__CUDA_NO_BFLOAT16_OPERATORS__",
-        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-        "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-        "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
-        f"--threads={len(sm_targets)}",
-        "--expt-relaxed-constexpr",
-        "--expt-extended-lambda",
-        "--ptxas-options=--allow-expensive-optimizations=true",
-    ]
+        assert len(sm_targets) > 0, "No SM targets found"
 
-    if os.getenv("NUNCHAKU_BUILD_WHEELS", "0") == "0":
-        NVCC_FLAGS.append("--generate-line-info")
+        GCC_FLAGS = ["-DENABLE_BF16=1", "-DBUILD_NUNCHAKU=1", "-fvisibility=hidden", "-g", "-std=c++20", "-UNDEBUG", "-Og"]
+        MSVC_FLAGS = ["/DENABLE_BF16=1", "/DBUILD_NUNCHAKU=1", "/std:c++20", "/UNDEBUG", "/Zc:__cplusplus", "/FS"]
+        NVCC_FLAGS = [
+            "-DENABLE_BF16=1",
+            "-DBUILD_NUNCHAKU=1",
+            "-g",
+            "-std=c++20",
+            "-UNDEBUG",
+            "-Xcudafe",
+            "--diag_suppress=20208",  # spdlog: 'long double' is treated as 'double' in device code
+            *cond("-G"),
+            "-U__CUDA_NO_HALF_OPERATORS__",
+            "-U__CUDA_NO_HALF_CONVERSIONS__",
+            "-U__CUDA_NO_HALF2_OPERATORS__",
+            "-U__CUDA_NO_HALF2_CONVERSIONS__",
+            "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+            "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+            "-U__CUDA_NO_BFLOAT162_OPERATORS__",
+            "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
+            f"--threads={len(sm_targets)}",
+            "--expt-relaxed-constexpr",
+            "--expt-extended-lambda",
+            "--ptxas-options=--allow-expensive-optimizations=true",
+        ]
 
-    for target in sm_targets:
-        NVCC_FLAGS += ["-gencode", f"arch=compute_{target},code=sm_{target}"]
+        if os.getenv("NUNCHAKU_BUILD_WHEELS", "0") == "0":
+            NVCC_FLAGS.append("--generate-line-info")
 
-    NVCC_MSVC_FLAGS = ["-Xcompiler", "/Zc:__cplusplus", "-Xcompiler", "/FS", "-Xcompiler", "/bigobj"]
+        for target in sm_targets:
+            NVCC_FLAGS += ["-gencode", f"arch=compute_{target},code=sm_{target}"]
 
-    nunchaku_extension = CUDAExtension(
-        name="nunchaku._C",
-        sources=[
-            "nunchaku/csrc/pybind.cpp",
-            "src/interop/torch.cpp",
-            "src/activation.cpp",
-            "src/layernorm.cpp",
-            "src/Linear.cpp",
-            *ncond("src/FluxModel.cpp"),
-            *ncond("src/SanaModel.cpp"),
-            "src/Serialization.cpp",
-            "src/Module.cpp",
-            *ncond("third_party/Block-Sparse-Attention/csrc/block_sparse_attn/src/flash_fwd_hdim64_fp16_sm80.cu"),
-            *ncond("third_party/Block-Sparse-Attention/csrc/block_sparse_attn/src/flash_fwd_hdim64_bf16_sm80.cu"),
-            *ncond("third_party/Block-Sparse-Attention/csrc/block_sparse_attn/src/flash_fwd_hdim128_fp16_sm80.cu"),
-            *ncond("third_party/Block-Sparse-Attention/csrc/block_sparse_attn/src/flash_fwd_hdim128_bf16_sm80.cu"),
-            *ncond("third_party/Block-Sparse-Attention/csrc/block_sparse_attn/src/flash_fwd_block_hdim64_fp16_sm80.cu"),
-            *ncond("third_party/Block-Sparse-Attention/csrc/block_sparse_attn/src/flash_fwd_block_hdim64_bf16_sm80.cu"),
-            *ncond(
-                "third_party/Block-Sparse-Attention/csrc/block_sparse_attn/src/flash_fwd_block_hdim128_fp16_sm80.cu"
-            ),
-            *ncond(
-                "third_party/Block-Sparse-Attention/csrc/block_sparse_attn/src/flash_fwd_block_hdim128_bf16_sm80.cu"
-            ),
-            "src/kernels/activation_kernels.cu",
-            "src/kernels/layernorm_kernels.cu",
-            "src/kernels/misc_kernels.cu",
-            "src/kernels/zgemm/gemm_w4a4.cu",
-            "src/kernels/zgemm/gemm_w4a4_test.cu",
-            "src/kernels/zgemm/gemm_w4a4_launch_fp16_int4.cu",
-            "src/kernels/zgemm/gemm_w4a4_launch_fp16_int4_fasteri2f.cu",
-            "src/kernels/zgemm/gemm_w4a4_launch_fp16_fp4.cu",
-            "src/kernels/zgemm/gemm_w4a4_launch_bf16_int4.cu",
-            "src/kernels/zgemm/gemm_w4a4_launch_bf16_fp4.cu",
-            "src/kernels/zgemm/gemm_w8a8.cu",
-            "src/kernels/zgemm/attention.cu",
-            "src/kernels/dwconv.cu",
-            "src/kernels/gemm_batched.cu",
-            "src/kernels/gemm_f16.cu",
-            "src/kernels/awq/gemm_awq.cu",
-            "src/kernels/awq/gemv_awq.cu",
-            *ncond("third_party/Block-Sparse-Attention/csrc/block_sparse_attn/flash_api.cpp"),
-            *ncond("third_party/Block-Sparse-Attention/csrc/block_sparse_attn/flash_api_adapter.cpp"),
-        ],
-        extra_compile_args={"gcc": GCC_FLAGS, "msvc": MSVC_FLAGS, "nvcc": NVCC_FLAGS, "nvcc_msvc": NVCC_MSVC_FLAGS},
-        include_dirs=INCLUDE_DIRS,
-    )
+        NVCC_MSVC_FLAGS = ["-Xcompiler", "/Zc:__cplusplus", "-Xcompiler", "/FS", "-Xcompiler", "/bigobj"]
+
+        nunchaku_extension = CUDAExtension(
+            name="nunchaku._C",
+            sources=[
+                "nunchaku/csrc/pybind.cpp",
+                "src/interop/torch.cpp",
+                "src/activation.cpp",
+                "src/layernorm.cpp",
+                "src/Linear.cpp",
+                *ncond("src/FluxModel.cpp"),
+                *ncond("src/SanaModel.cpp"),
+                "src/Serialization.cpp",
+                "src/Module.cpp",
+                *ncond("third_party/Block-Sparse-Attention/csrc/block_sparse_attn/src/flash_fwd_hdim64_fp16_sm80.cu"),
+                *ncond("third_party/Block-Sparse-Attention/csrc/block_sparse_attn/src/flash_fwd_hdim64_bf16_sm80.cu"),
+                *ncond("third_party/Block-Sparse-Attention/csrc/block_sparse_attn/src/flash_fwd_hdim128_fp16_sm80.cu"),
+                *ncond("third_party/Block-Sparse-Attention/csrc/block_sparse_attn/src/flash_fwd_hdim128_bf16_sm80.cu"),
+                *ncond(
+                    "third_party/Block-Sparse-Attention/csrc/block_sparse_attn/src/flash_fwd_block_hdim64_fp16_sm80.cu"
+                ),
+                *ncond(
+                    "third_party/Block-Sparse-Attention/csrc/block_sparse_attn/src/flash_fwd_block_hdim64_bf16_sm80.cu"
+                ),
+                *ncond(
+                    "third_party/Block-Sparse-Attention/csrc/block_sparse_attn/src/flash_fwd_block_hdim128_fp16_sm80.cu"
+                ),
+                *ncond(
+                    "third_party/Block-Sparse-Attention/csrc/block_sparse_attn/src/flash_fwd_block_hdim128_bf16_sm80.cu"
+                ),
+                "src/kernels/activation_kernels.cu",
+                "src/kernels/layernorm_kernels.cu",
+                "src/kernels/misc_kernels.cu",
+                "src/kernels/zgemm/gemm_w4a4.cu",
+                "src/kernels/zgemm/gemm_w4a4_test.cu",
+                "src/kernels/zgemm/gemm_w4a4_launch_fp16_int4.cu",
+                "src/kernels/zgemm/gemm_w4a4_launch_fp16_int4_fasteri2f.cu",
+                "src/kernels/zgemm/gemm_w4a4_launch_fp16_fp4.cu",
+                "src/kernels/zgemm/gemm_w4a4_launch_bf16_int4.cu",
+                "src/kernels/zgemm/gemm_w4a4_launch_bf16_fp4.cu",
+                "src/kernels/zgemm/gemm_w8a8.cu",
+                "src/kernels/zgemm/attention.cu",
+                "src/kernels/dwconv.cu",
+                "src/kernels/gemm_batched.cu",
+                "src/kernels/gemm_f16.cu",
+                "src/kernels/awq/gemm_awq.cu",
+                "src/kernels/awq/gemv_awq.cu",
+                *ncond("third_party/Block-Sparse-Attention/csrc/block_sparse_attn/flash_api.cpp"),
+                *ncond("third_party/Block-Sparse-Attention/csrc/block_sparse_attn/flash_api_adapter.cpp"),
+            ],
+            extra_compile_args={"gcc": GCC_FLAGS, "msvc": MSVC_FLAGS, "nvcc": NVCC_FLAGS, "nvcc_msvc": NVCC_MSVC_FLAGS},
+            include_dirs=INCLUDE_DIRS,
+        )
+        ext_modules.append(nunchaku_extension)
 
     setuptools.setup(
         name="nunchaku",
         version=version,
         packages=setuptools.find_packages(),
-        ext_modules=[nunchaku_extension],
+        ext_modules=ext_modules,
         cmdclass={"build_ext": CustomBuildExtension},
     )

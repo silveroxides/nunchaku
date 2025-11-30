@@ -99,7 +99,10 @@ optional-dependencies.full = [
 ]
 
 [tool.setuptools.packages.find]
-include = [ "nunchaku" ]
+include = [ "nunchaku*" ]
+
+[tool.setuptools.package-data]
+"nunchaku.kernels" = ["*"]
 
 [tool.black]
 line-length = 120
